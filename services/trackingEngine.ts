@@ -24,8 +24,9 @@ export class TrackingEngine {
   // We store 5 specific anchors for interpolation
   private anchors: CalibrationAnchor[] = [];
   
-  // Running average for the last raw iris position
+  // Exponential Moving Average for the raw iris position to reduce jitter at the source
   private lastRawRelative: Point = { x: 0.5, y: 0.5 };
+  private smoothingAlpha = 0.25; // Lower = more stable but more lag. Higher = more responsive but jittery.
 
   private constructor() {}
 
@@ -52,8 +53,8 @@ export class TrackingEngine {
     this.faceMesh.setOptions({
       maxNumFaces: 1,
       refineLandmarks: true,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.7,
+      minDetectionConfidence: 0.75,
+      minTrackingConfidence: 0.75,
     });
 
     this.faceMesh.onResults(this.onResults.bind(this));
@@ -72,12 +73,10 @@ export class TrackingEngine {
 
   /**
    * Calculates the iris position relative to the eye socket.
-   * This is the key to head-invariant tracking.
    */
   private getRelativeIris(landmarks: any[]): Point {
     // Landmarks for Eye Socket (Left Eye)
-    // 33: Left Corner, 133: Right Corner, 159: Top, 145: Bottom
-    const iris = landmarks[468]; // Left Iris Center
+    const iris = landmarks[468]; 
     const left = landmarks[33];
     const right = landmarks[133];
     const top = landmarks[159];
@@ -86,16 +85,17 @@ export class TrackingEngine {
     const hRange = right.x - left.x;
     const vRange = bottom.y - top.y;
 
-    // Calculate position of iris within the box of the eye socket
-    // We use a sensitivity multiplier because eye movement is small
-    const x = (iris.x - left.x) / hRange;
-    const y = (iris.y - top.y) / vRange;
+    const rawX = (iris.x - left.x) / hRange;
+    const rawY = (iris.y - top.y) / vRange;
 
-    return { x, y };
+    // Apply Exponential Moving Average (EMA) to smooth out micro-fluctuations
+    this.lastRawRelative.x = this.lastRawRelative.x * (1 - this.smoothingAlpha) + rawX * this.smoothingAlpha;
+    this.lastRawRelative.y = this.lastRawRelative.y * (1 - this.smoothingAlpha) + rawY * this.smoothingAlpha;
+
+    return { x: this.lastRawRelative.x, y: this.lastRawRelative.y };
   }
 
   recordCalibrationAnchor(targetX: number, targetY: number, rawX: number, rawY: number) {
-    // Add or update anchor
     const existingIndex = this.anchors.findIndex(a => a.target.x === targetX && a.target.y === targetY);
     if (existingIndex > -1) {
       this.anchors[existingIndex].raw = { x: rawX, y: rawY };
@@ -106,6 +106,7 @@ export class TrackingEngine {
 
   resetCalibration(): void {
     this.anchors = [];
+    this.lastRawRelative = { x: 0.5, y: 0.5 };
   }
 
   private onResults(results: any): void {
@@ -116,15 +117,11 @@ export class TrackingEngine {
 
     const landmarks = results.multiFaceLandmarks[0];
     const relative = this.getRelativeIris(landmarks);
-    this.lastRawRelative = relative;
 
-    // Mapping Logic
     let screenX = 0.5;
     let screenY = 0.5;
 
     if (this.anchors.length >= 5) {
-      // Piecewise Linear Mapping or weighted interpolation
-      // For now, we find the min/max of our recorded relative iris positions
       const minX = Math.min(...this.anchors.map(a => a.raw.x));
       const maxX = Math.max(...this.anchors.map(a => a.raw.x));
       const minY = Math.min(...this.anchors.map(a => a.raw.y));
@@ -133,20 +130,20 @@ export class TrackingEngine {
       const rangeX = (maxX - minX) || 0.1;
       const rangeY = (maxY - minY) || 0.1;
 
-      // Map current relative iris to 0-1 space based on our recorded extremes
       let normX = (relative.x - minX) / rangeX;
       let normY = (relative.y - minY) / rangeY;
 
-      // Invert X because MediaPipe landmarks are in image-space (mirrored for user)
+      // Invert X (mirroring) and Invert Y (based on user feedback)
       normX = 1 - normX;
+      normY = 1 - normY; 
 
       // Clamp and Scale to Screen
       screenX = Math.max(0, Math.min(1, normX)) * window.innerWidth;
       screenY = Math.max(0, Math.min(1, normY)) * window.innerHeight;
     } else {
-      // Fallback to center-relative basic mapping if not calibrated
+      // Fallback
       screenX = (1 - relative.x) * window.innerWidth;
-      screenY = relative.y * window.innerHeight;
+      screenY = (1 - relative.y) * window.innerHeight;
     }
 
     if (this.onGazeCallback) {

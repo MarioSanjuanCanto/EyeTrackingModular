@@ -33,11 +33,10 @@ export const EyeTrackerProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const updatePosition = useCallback((newPos: Point) => {
     const dx = newPos.x - smoothedPos.current.x;
     const dy = newPos.y - smoothedPos.current.y;
-    const dist = Math.sqrt(dx*dx + dy*dy);
     
-    // Low-pass filter smoothing
-    // We use a slightly stronger smoothing for iris tracking because it's naturally jittery
-    const smoothing = state.mode === TrackingMode.GAZE ? 0.08 : DEFAULT_CONFIG.smoothingFactor;
+    // Stronger smoothing for Gaze mode to eliminate jitters
+    // 0.04 provides very stable movement but adds slight lag
+    const smoothing = state.mode === TrackingMode.GAZE ? 0.045 : 0.2;
     
     smoothedPos.current = {
       x: smoothedPos.current.x + dx * smoothing,
@@ -46,4 +45,97 @@ export const EyeTrackerProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
     setState(prev => ({
       ...prev,
-      
+      position: smoothedPos.current,
+    }));
+  }, [state.mode]);
+
+  useEffect(() => {
+    if (state.mode === TrackingMode.GAZE && state.isEnabled) {
+      engine.current.initialize().then(() => {
+        engine.current.setCallback((point) => {
+          if (point) updatePosition(point);
+        });
+      }).catch(err => {
+        console.error("Failed to init MediaPipe Engine:", err);
+      });
+    } else {
+      engine.current.pause();
+    }
+
+    return () => {
+      engine.current.pause();
+    };
+  }, [state.mode, state.isEnabled, updatePosition]);
+
+  useEffect(() => {
+    if (state.mode === TrackingMode.MOUSE_SIMULATION && state.isEnabled) {
+      const handleMouseMove = (e: MouseEvent) => {
+        updatePosition({ x: e.clientX, y: e.clientY });
+      };
+      window.addEventListener('mousemove', handleMouseMove);
+      return () => window.removeEventListener('mousemove', handleMouseMove);
+    }
+  }, [state.mode, state.isEnabled, updatePosition]);
+
+  useEffect(() => {
+    if (!state.isEnabled) return;
+
+    const dwellLoop = (time: number) => {
+      const deltaTime = time - lastUpdateRef.current;
+      lastUpdateRef.current = time;
+
+      const el = document.elementFromPoint(state.position.x, state.position.y) as HTMLElement | null;
+      const interactiveEl = el?.closest(INTERACTIVE_SELECTORS.join(', ')) as HTMLElement | null;
+
+      setState(prev => {
+        if (interactiveEl !== prev.targetElement) {
+          return {
+            ...prev,
+            targetElement: interactiveEl,
+            dwellProgress: 0,
+          };
+        }
+
+        if (interactiveEl) {
+          const newProgress = Math.min(100, prev.dwellProgress + (deltaTime / DEFAULT_CONFIG.dwellTimeMs) * 100);
+          
+          if (newProgress >= 100 && prev.dwellProgress < 100) {
+            interactiveEl.click();
+            return { ...prev, dwellProgress: 100 }; 
+          }
+
+          return { ...prev, dwellProgress: newProgress };
+        }
+
+        return { ...prev, dwellProgress: 0 };
+      });
+
+      requestRef.current = requestAnimationFrame(dwellLoop);
+    };
+
+    requestRef.current = requestAnimationFrame(dwellLoop);
+    return () => {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
+    };
+  }, [state.position.x, state.position.y, state.isEnabled]);
+
+  const setEnabled = (enabled: boolean) => setState(p => ({ ...p, isEnabled: enabled }));
+  const setMode = (mode: TrackingMode) => setState(p => ({ ...p, mode }));
+  const resetCalibration = () => {
+    engine.current.resetCalibration();
+    setState(p => ({ ...p, isCalibrated: false }));
+  };
+  const setCalibrated = (val: boolean) => setState(p => ({ ...p, isCalibrated: val }));
+
+  return (
+    <EyeTrackerContext.Provider value={{ state, setEnabled, setMode, resetCalibration, setCalibrated }}>
+      {children}
+    </EyeTrackerContext.Provider>
+  );
+};
+
+export const useEyeTracker = () => {
+  const context = useContext(EyeTrackerContext);
+  if (!context) throw new Error('useEyeTracker must be used within EyeTrackerProvider');
+  return context;
+};
