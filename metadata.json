@@ -1,0 +1,7 @@
+{
+  "name": "Modular Eye-Tracking Tool",
+  "description": "A modular, production-ready eye-tracking cursor and dwell-click system built with React and Tailwind CSS, featuring smooth movement and visual dwell indicators.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

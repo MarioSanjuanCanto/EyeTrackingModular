@@ -1,0 +1,50 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ocular Eye Tracker - MediaPipe Edition</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- MediaPipe Face Mesh Dependencies -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+      background-color: #0f172a;
+      color: #f8fafc;
+    }
+    /* Hidden utility video for MediaPipe processing */
+    #mediapipe-video {
+      display: none;
+      position: fixed;
+      bottom: 0;
+      right: 0;
+      width: 320px;
+      height: 240px;
+      transform: scaleX(-1);
+      z-index: -1;
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@^19.2.4",
+      "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+      "react/": "https://esm.sh/react@^19.2.4/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <video id="mediapipe-video" playsinline></video>
+</body>
+</html>
