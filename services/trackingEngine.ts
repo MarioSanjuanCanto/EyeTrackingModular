@@ -8,6 +8,11 @@ declare global {
   }
 }
 
+interface CalibrationAnchor {
+  target: Point; // Screen normalized 0-1
+  raw: Point;    // Iris-relative 0-1
+}
+
 export class TrackingEngine {
   private static instance: TrackingEngine;
   private faceMesh: any;
@@ -16,11 +21,11 @@ export class TrackingEngine {
   private isInitialized: boolean = false;
   private onGazeCallback: ((point: Point | null) => void) | null = null;
 
-  // Calibration boundaries (normalized iris coordinates)
-  private minX = 0.42;
-  private maxX = 0.58;
-  private minY = 0.42;
-  private maxY = 0.58;
+  // We store 5 specific anchors for interpolation
+  private anchors: CalibrationAnchor[] = [];
+  
+  // Running average for the last raw iris position
+  private lastRawRelative: Point = { x: 0.5, y: 0.5 };
 
   private constructor() {}
 
@@ -47,8 +52,8 @@ export class TrackingEngine {
     this.faceMesh.setOptions({
       maxNumFaces: 1,
       refineLandmarks: true,
-      minDetectionConfidence: 0.6,
-      minTrackingConfidence: 0.6,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7,
     });
 
     this.faceMesh.onResults(this.onResults.bind(this));
@@ -66,23 +71,41 @@ export class TrackingEngine {
   }
 
   /**
-   * Updates the internal mapping ranges based on calibration data.
-   * This is called when the user "looks" at corners.
+   * Calculates the iris position relative to the eye socket.
+   * This is the key to head-invariant tracking.
    */
-  updateCalibrationRange(irisX: number, irisY: number) {
-    // We expand the range based on where the user actually looks
-    this.minX = Math.min(this.minX, irisX);
-    this.maxX = Math.max(this.maxX, irisX);
-    this.minY = Math.min(this.minY, irisY);
-    this.maxY = Math.max(this.maxY, irisY);
+  private getRelativeIris(landmarks: any[]): Point {
+    // Landmarks for Eye Socket (Left Eye)
+    // 33: Left Corner, 133: Right Corner, 159: Top, 145: Bottom
+    const iris = landmarks[468]; // Left Iris Center
+    const left = landmarks[33];
+    const right = landmarks[133];
+    const top = landmarks[159];
+    const bottom = landmarks[145];
+
+    const hRange = right.x - left.x;
+    const vRange = bottom.y - top.y;
+
+    // Calculate position of iris within the box of the eye socket
+    // We use a sensitivity multiplier because eye movement is small
+    const x = (iris.x - left.x) / hRange;
+    const y = (iris.y - top.y) / vRange;
+
+    return { x, y };
+  }
+
+  recordCalibrationAnchor(targetX: number, targetY: number, rawX: number, rawY: number) {
+    // Add or update anchor
+    const existingIndex = this.anchors.findIndex(a => a.target.x === targetX && a.target.y === targetY);
+    if (existingIndex > -1) {
+      this.anchors[existingIndex].raw = { x: rawX, y: rawY };
+    } else {
+      this.anchors.push({ target: { x: targetX, y: targetY }, raw: { x: rawX, y: rawY } });
+    }
   }
 
   resetCalibration(): void {
-    // Reset to tighter defaults
-    this.minX = 0.45;
-    this.maxX = 0.55;
-    this.minY = 0.45;
-    this.maxY = 0.55;
+    this.anchors = [];
   }
 
   private onResults(results: any): void {
@@ -92,38 +115,47 @@ export class TrackingEngine {
     }
 
     const landmarks = results.multiFaceLandmarks[0];
-    
-    // Iris landmarks: 468 (Left Center), 473 (Right Center)
-    const leftIris = landmarks[468];
-    const rightIris = landmarks[473];
-    const avgIrisX = (leftIris.x + rightIris.x) / 2;
-    const avgIrisY = (leftIris.y + rightIris.y) / 2;
+    const relative = this.getRelativeIris(landmarks);
+    this.lastRawRelative = relative;
 
-    // Use current range to map to screen
-    // We add a small buffer (10%) to the range to make reaching corners easier
-    const padding = 0.02;
-    const rangeX = (this.maxX - this.minX) || 0.1;
-    const rangeY = (this.maxY - this.minY) || 0.1;
+    // Mapping Logic
+    let screenX = 0.5;
+    let screenY = 0.5;
 
-    let screenX = (avgIrisX - (this.minX + padding)) / (rangeX - padding * 2);
-    let screenY = (avgIrisY - (this.minY + padding)) / (rangeY - padding * 2);
+    if (this.anchors.length >= 5) {
+      // Piecewise Linear Mapping or weighted interpolation
+      // For now, we find the min/max of our recorded relative iris positions
+      const minX = Math.min(...this.anchors.map(a => a.raw.x));
+      const maxX = Math.max(...this.anchors.map(a => a.raw.x));
+      const minY = Math.min(...this.anchors.map(a => a.raw.y));
+      const maxY = Math.max(...this.anchors.map(a => a.raw.y));
 
-    // Invert X because camera is mirrored
-    screenX = 1 - screenX;
+      const rangeX = (maxX - minX) || 0.1;
+      const rangeY = (maxY - minY) || 0.1;
+
+      // Map current relative iris to 0-1 space based on our recorded extremes
+      let normX = (relative.x - minX) / rangeX;
+      let normY = (relative.y - minY) / rangeY;
+
+      // Invert X because MediaPipe landmarks are in image-space (mirrored for user)
+      normX = 1 - normX;
+
+      // Clamp and Scale to Screen
+      screenX = Math.max(0, Math.min(1, normX)) * window.innerWidth;
+      screenY = Math.max(0, Math.min(1, normY)) * window.innerHeight;
+    } else {
+      // Fallback to center-relative basic mapping if not calibrated
+      screenX = (1 - relative.x) * window.innerWidth;
+      screenY = relative.y * window.innerHeight;
+    }
 
     if (this.onGazeCallback) {
-      this.onGazeCallback({ 
-        x: screenX * window.innerWidth, 
-        y: screenY * window.innerHeight 
-      });
-      
-      // We also pass the raw iris data for calibration components to use
-      (this.onGazeCallback as any).rawIris = { x: avgIrisX, y: avgIrisY };
+      this.onGazeCallback({ x: screenX, y: screenY });
     }
   }
 
   getRawIris(): Point | null {
-    return (this.onGazeCallback as any)?.rawIris || null;
+    return this.lastRawRelative;
   }
 
   setCallback(callback: (data: Point | null) => void): void {
